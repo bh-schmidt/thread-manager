@@ -5,14 +5,16 @@ const options = {
     reject: false,
 }
 
-const watchFlag = '-w'
-const debugFlag = '--debug'
 
-const watch = process.argv.includes(watchFlag)
-const isDebug = process.argv.includes(debugFlag)
+const watchCmd = 'watch'
+const watch = process.argv[2] == watchCmd
 
-const newArgs = [...process.argv.filter(e => e != debugFlag && e != watchFlag)]
-newArgs.splice(0, 2)
+const newArgs = [...process.argv]
+if (watch) {
+    newArgs.splice(0, 3)
+} else {
+    newArgs.splice(0, 2)
+}
 
 if (watch) {
     const cleanArgs = newArgs.length > 0 ?
@@ -33,8 +35,7 @@ else {
     const cleanArgs = newArgs.length > 0 ?
         `"${newArgs.join(`" "`)}"` :
         ''
-    const debug = isDebug ? debugFlag : ''
-    const testResult = await execa(`node --experimental-vm-modules node_modules/jest/bin/jest.js --passWithNoTests --config ./dist/jest.config.js --detectOpenHandles --verbose ${debug} ${cleanArgs}`, options)
+    const testResult = await execa(`node --experimental-vm-modules node_modules/jest/bin/jest.js --passWithNoTests --config ./dist/jest.config.js --detectOpenHandles --verbose ${cleanArgs}`, options)
 
     if (testResult.failed) {
         process.exit(testResult.exitCode)
