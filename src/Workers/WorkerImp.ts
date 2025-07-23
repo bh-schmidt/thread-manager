@@ -26,6 +26,7 @@ export class WorkerImp {
     channel?: MessageChannel;
     globalPoolChannel?: MessageChannel
     startingPromise?: Promise<void>
+    idleTimeoutId?: any
 
     private _emitter: EventEmitter<WorkerEvents>
 

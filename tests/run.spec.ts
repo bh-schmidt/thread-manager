@@ -4,7 +4,6 @@ import { fileURLToPath } from "url"
 import { MessageChannel } from "worker_threads"
 import { PromiseHandler } from "../src/Workers/PromiseHandler"
 import { WorkerPool } from "../src/Workers/WorkerPool"
-import { Piscina } from 'piscina'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)

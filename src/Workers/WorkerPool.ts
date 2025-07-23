@@ -155,7 +155,7 @@ export class WorkerPool {
         }
 
         await this.removeInactiveWorkers()
-        this.createMinimumWorkers()
+        this.ensureMinimumWorkers()
 
         const workers = this.workers.filter(e => e.info.status == 'created')
         for (const worker of workers as WorkerImp[]) {
@@ -198,58 +198,75 @@ export class WorkerPool {
         this.queue.push(task);
         this.tasks[taskId] = task;
 
-        this.runQueue()
+        this.runWorker()
+        // this.runQueue()
 
         return task.promise;
     }
 
-    private sendTaskToMainThread<T = unknown>(payload: any, args: TaskArgs, taskId: string): TaskPromise<T> {
-        if (!this._globalPoolMessageSender) {
-            throw new Error(`The '_globalPoolMessageSender' was not instanced.`)
+    private async runWorker() {
+        if (this.options.globalPool && !isMainThread) {
+            throw new Error(`'runWorker' only works on main thread when using 'globalPool'.`)
         }
 
-        const context = ExecutionContext.getStore<TaskContext>()
-        const taskMessage: GlobalPool.RunTaskMessage = {
-            taskId: taskId,
-            args: args,
-            payload: payload,
-            workerChain: [
-                ...context.workerChain,
-                wd!.workerId
-            ],
+        if (this.queue.length == 0) {
+            return
         }
 
-        const message: GlobalPool.PoolMessage = {
-            type: 'run-task',
-            poolName: this.options.poolName!,
-            payload: taskMessage
+        try {
+            await this.removeInactiveWorkers()
+
+            if (this.workers.length == this.options.maxWorkers) {
+                return
+            }
+        } catch (error) {
+            console.error(error)
         }
 
-        const transferList = args.messagePorts ?
-            Object.values(args.messagePorts) :
-            undefined
-
-        const prom = this._globalPoolMessageSender.request(message, transferList)
-        const entries: TaskPromiseEntries = {
-            taskId: taskId,
-            getWorkerId: async () => {
-                const workerIdMessage: GlobalPool.GetWorkerIdMessage = {
-                    taskId: taskId
-                }
-
-                const message: GlobalPool.PoolMessage = {
-                    type: 'get-worker-id',
-                    poolName: this.options.poolName!,
-                    payload: workerIdMessage
-                }
-
-                return await this._globalPoolMessageSender!.request(message)
-            },
+        const worker = this.getLockedWorkerNew()
+        if (!worker) {
+            return
         }
 
-        Object.assign(prom, entries)
+        clearTimeout(worker.idleTimeoutId)
 
-        return prom as TaskPromise<T>
+        try {
+            if (worker.info.status == 'created') {
+                await this.startWorker(worker)
+            }
+        } catch (error) {
+            console.error(error)
+            worker.unlock()
+            return
+        }
+
+        if (worker.info.status == 'closed') {
+            console.error('The worker is closed.')
+            worker.unlock()
+            return
+        }
+
+        try {
+            while (this.queue.length > 0 && worker?.info.status as any != 'closed') {
+                const task = this.queue.shift()
+
+                await task?.run(worker)
+                    .finally(() => {
+                        worker.unlock()
+                        this.safeEmit('worker-unlocked', worker.info)
+                    })
+            }
+        } catch (error) {
+            console.error(error)
+            worker.unlock()
+            return
+        }
+
+        this.safeEmit('worker-ready', worker.info)
+
+        worker.idleTimeoutId = setTimeout(async () => {
+            await this.removeIdleWorker(worker)
+        }, this.options.idleTimeout);
     }
 
     private async runQueue() {
@@ -269,7 +286,7 @@ export class WorkerPool {
             console.error(error)
         }
 
-        this.createMinimumWorkers()
+        this.ensureMinimumWorkers()
 
         while (this.queue.length > 0) {
             if (this._terminated) {
@@ -322,7 +339,56 @@ export class WorkerPool {
         this._queueRunning = false
     }
 
-    private createMinimumWorkers() {
+    private sendTaskToMainThread<T = unknown>(payload: any, args: TaskArgs, taskId: string): TaskPromise<T> {
+        if (!this._globalPoolMessageSender) {
+            throw new Error(`The '_globalPoolMessageSender' was not instanced.`)
+        }
+
+        const context = ExecutionContext.getStore<TaskContext>()
+        const taskMessage: GlobalPool.RunTaskMessage = {
+            taskId: taskId,
+            args: args,
+            payload: payload,
+            workerChain: [
+                ...context.workerChain,
+                wd!.workerId
+            ],
+        }
+
+        const message: GlobalPool.PoolMessage = {
+            type: 'run-task',
+            poolName: this.options.poolName!,
+            payload: taskMessage
+        }
+
+        const transferList = args.messagePorts ?
+            Object.values(args.messagePorts) :
+            undefined
+
+        const prom = this._globalPoolMessageSender.request(message, transferList)
+        const entries: TaskPromiseEntries = {
+            taskId: taskId,
+            getWorkerId: async () => {
+                const workerIdMessage: GlobalPool.GetWorkerIdMessage = {
+                    taskId: taskId
+                }
+
+                const message: GlobalPool.PoolMessage = {
+                    type: 'get-worker-id',
+                    poolName: this.options.poolName!,
+                    payload: workerIdMessage
+                }
+
+                return await this._globalPoolMessageSender!.request(message)
+            },
+        }
+
+        Object.assign(prom, entries)
+
+        return prom as TaskPromise<T>
+    }
+
+    private ensureMinimumWorkers() {
         if (this.options.globalPool && !isMainThread) {
             throw new Error(`'createWorkers' only works on main thread when using 'globalPool'.`)
         }
@@ -399,13 +465,32 @@ export class WorkerPool {
         return worker
     }
 
+    private getLockedWorkerNew(): WorkerImp | undefined {
+        this.ensureMinimumWorkers()
+
+        let worker = this.workers.find(w => w.info.status != 'closed' && !w.info.isLocked)
+
+        if (worker) {
+            worker.lock()
+            return worker
+        }
+
+        if (this.workers.length < this.options.maxWorkers!) {
+            const worker = this.createWorker()
+            worker.lock()
+            return worker
+        }
+
+        return undefined
+    }
+
     private async removeInactiveWorkers() {
         if (this.options.globalPool && !isMainThread) {
             throw new Error(`'removeInactiveWorkers' only works on main thread when using 'globalPool'.`)
         }
 
         const inactiveWorkers = this.workers
-            .filter(e => e.info.status == 'closed') as WorkerImp[]
+            .filter(e => e.info.status == 'closed')
 
         for (const worker of inactiveWorkers) {
             await this.removeWorker(worker)
