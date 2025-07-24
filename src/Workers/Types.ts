@@ -7,13 +7,12 @@ export type TaskStatus = 'queued' | 'running' | 'finished' | 'failed'
 export type SocketMessageType = 'request' | 'resolve' | 'reject' | 'status'
 export type AnyFunctionType = (...values: any[]) => any
 export type PoolEvents = {
-    'error': [worker: WorkerInfo, error: any]
-    'exit': [worker: WorkerInfo, code: number]
-    'message': [worker: WorkerInfo, value: any]
-    'messageerror': [worker: WorkerInfo, error: any]
-    'online': [worker: WorkerInfo]
-    'worker-ready': [worker: WorkerInfo]
-    'worker-idle': [worker: WorkerInfo]
+    'worker-error': [worker: WorkerInfo, error: any]
+    'worker-exit': [worker: WorkerInfo, code: number]
+    'worker-message': [worker: WorkerInfo, value: any]
+    'worker-messageerror': [worker: WorkerInfo, error: any]
+    'worker-online': [worker: WorkerInfo]
+    'worker-locked': [worker: WorkerInfo]
     'worker-unlocked': [worker: WorkerInfo]
     'worker-removed': [worker: WorkerInfo]
     'terminate': [],

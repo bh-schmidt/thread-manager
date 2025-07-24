@@ -1,6 +1,7 @@
 import Piscina from "piscina";
 import { Bench } from "tinybench";
 import { Workers } from "../dist/src/Index.js";
+import assert from "assert";
 
 /**
  * @type {Workers.WorkerPool} 
@@ -28,9 +29,11 @@ bench.add(
     async () => {
         piscina = new Piscina()
         for (let i = 0; i < iterations; i++) {
-            await piscina.run([2, 2], {
+            const result = await piscina.run([2, 2], {
                 filename: new URL('./scripts/piscina-sum.js', import.meta.url).href
             })
+
+            assert(result == 4)
         }
     },
     {
@@ -44,9 +47,10 @@ bench.add(
     async () => {
         pool = new Workers.WorkerPool()
         for (let i = 0; i < iterations; i++) {
-            await pool.run([2, 2], {
+            const result = await pool.run([2, 2], {
                 fileName: new URL('./scripts/sum.js', import.meta.url)
             })
+            assert(result == 4)
         }
     },
     {
@@ -62,9 +66,10 @@ bench.add(
             globalPool: true
         })
         for (let i = 0; i < iterations; i++) {
-            await pool.run([2, 2], {
+            const result = await pool.run([2, 2], {
                 fileName: new URL('./scripts/sum.js', import.meta.url)
             })
+            assert(result == 4)
         }
     },
     {

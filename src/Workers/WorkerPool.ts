@@ -154,11 +154,15 @@ export class WorkerPool {
             throw new Error(`'ensureWorkers' only works on main thread when using 'globalPool'.`)
         }
 
-        await this.removeInactiveWorkers()
         this.ensureMinimumWorkers()
 
-        const workers = this.workers.filter(e => e.info.status == 'created')
-        for (const worker of workers as WorkerImp[]) {
+        while (true) {
+            const worker = this.workers.find(e => e.info.status == 'created')
+
+            if (!worker) {
+                break
+            }
+
             await this.startWorker(worker)
         }
     }
@@ -213,14 +217,8 @@ export class WorkerPool {
             return
         }
 
-        try {
-            await this.removeInactiveWorkers()
-
-            if (this.workers.length == this.options.maxWorkers) {
-                return
-            }
-        } catch (error) {
-            console.error(error)
+        if (this.workers.length == this.options.maxWorkers) {
+            return
         }
 
         const worker = this.getLockedWorkerNew()
@@ -234,8 +232,15 @@ export class WorkerPool {
             if (worker.info.status == 'created') {
                 await this.startWorker(worker)
             }
+
+            if (worker.info.status == 'starting') {
+                await worker.startingPromise
+            }
         } catch (error) {
-            console.error(error)
+            if (!this._terminated) {
+                console.error(error)
+            }
+
             worker.unlock()
             return
         }
@@ -246,23 +251,18 @@ export class WorkerPool {
             return
         }
 
-        try {
-            while (this.queue.length > 0 && worker?.info.status as any != 'closed') {
-                const task = this.queue.shift()
+        while (this.queue.length > 0 && worker?.info.status as any != 'closed') {
+            const task = this.queue.shift()
 
+            try {
                 await task?.run(worker)
-                    .finally(() => {
-                        worker.unlock()
-                        this.safeEmit('worker-unlocked', worker.info)
-                    })
+            } catch (error) {
+                console.error(error)
+                return
             }
-        } catch (error) {
-            console.error(error)
-            worker.unlock()
-            return
         }
 
-        this.safeEmit('worker-ready', worker.info)
+        worker.unlock()
 
         worker.idleTimeoutId = setTimeout(async () => {
             await this.removeIdleWorker(worker)
@@ -279,12 +279,6 @@ export class WorkerPool {
 
         this._queueRunning = true
         const maximumRetries = 3
-
-        try {
-            await this.removeInactiveWorkers()
-        } catch (error) {
-            console.error(error)
-        }
 
         this.ensureMinimumWorkers()
 
@@ -317,8 +311,6 @@ export class WorkerPool {
                 }
 
                 worker.unlock()
-                await this.removeInactiveWorkers()
-
 
                 if (task.info.retries < maximumRetries) {
                     task.info.retries++
@@ -424,19 +416,11 @@ export class WorkerPool {
                     ph.resolve(w);
                 };
 
-                const readyHandler = (info: WorkerInfo): void => {
-                    const w = this.workersDic[info.id]
-                    if (!info.isLocked) {
-                        ph.resolve(w);
-                    }
-                };
-
                 const terminateHandler = () => {
                     ph.reject(new Error('The pool was terminated.'));
                 };
 
                 this._emitter.on('worker-unlocked', unlockedHandler)
-                this._emitter.on('worker-ready', readyHandler)
                 this._emitter.on('terminate', terminateHandler)
 
                 const worker = await ph.promise
@@ -444,7 +428,6 @@ export class WorkerPool {
                 worker.lock()
 
                 this.off('worker-unlocked', unlockedHandler)
-                this.off('worker-ready', readyHandler)
                 this.off('terminate', terminateHandler)
 
                 return worker
@@ -482,19 +465,6 @@ export class WorkerPool {
         }
 
         return undefined
-    }
-
-    private async removeInactiveWorkers() {
-        if (this.options.globalPool && !isMainThread) {
-            throw new Error(`'removeInactiveWorkers' only works on main thread when using 'globalPool'.`)
-        }
-
-        const inactiveWorkers = this.workers
-            .filter(e => e.info.status == 'closed')
-
-        for (const worker of inactiveWorkers) {
-            await this.removeWorker(worker)
-        }
     }
 
     private async removeIdleWorker(worker: WorkerImp) {
@@ -552,10 +522,25 @@ export class WorkerPool {
         await worker.start()
 
         worker.instance?.on('error', async (err) => {
-            this.safeEmit('error', worker.info, err)
-            this.removeWorker(worker)
+            this.safeEmit('worker-error', worker.info, err)
+        })
+
+        worker.instance?.on('exit', async (code) => {
+            this.safeEmit('worker-exit', worker.info, code)
 
             if (this._terminated) {
+                return
+            }
+
+            await this.removeWorker(worker)
+
+            this.ensureMinimumWorkers()
+            this.ensureWorkers()
+            if (this.workers.length < this.options.minWorkers!) {
+
+            }
+
+            if (this.queue.length == 0) {
                 return
             }
 
@@ -568,47 +553,35 @@ export class WorkerPool {
                 return
             }
 
-            if (this.queue.length == 0) {
-                return
-            }
-
             const w = this.createWorker()
-            try {
-                await this.startWorker(w)
-            } catch (error) {
-                console.error(error)
-            }
-        })
 
-        worker.instance?.on('exit', (code) => {
-            this.safeEmit('exit', worker.info, code)
-            this.removeWorker(worker)
+            await this.startWorker(w)
+                .catch(err => {
+                    console.error(err)
+                })
+
+            this.runWorker()
         })
 
         worker.instance?.on('message', (value) => {
-            this.safeEmit('message', worker.info, value)
+            this.safeEmit('worker-message', worker.info, value)
         })
 
         worker.instance?.on('messageerror', (error) => {
-            this.safeEmit('messageerror', worker.info, error)
+            this.safeEmit('worker-messageerror', worker.info, error)
         })
 
         worker.instance?.on('online', () => {
-            this.safeEmit('online', worker.info)
-        })
-
-        worker.on('ready', () => {
-            this.safeEmit('worker-ready', worker.info)
+            this.safeEmit('worker-online', worker.info)
         })
 
         worker.on('unlock', () => {
             this.safeEmit('worker-unlocked', worker.info)
         })
 
-        worker.on('idle', async () => {
-            this.safeEmit('worker-idle', worker.info)
-            await this.removeIdleWorker(worker)
-        })
+        // worker.on('idle', async () => {
+        //     await this.removeIdleWorker(worker)
+        // })
 
         if (isMainThread && this.options.globalPool) {
             if (!worker.globalPoolChannel) {
@@ -889,10 +862,6 @@ export class WorkerPool {
         }
         this.queue = []
 
-        for (const worker of this.workers) {
-            await worker.terminate()
-        }
-        this.workers = []
 
         if (this.options.globalPool) {
             delete globalPools[this.options.poolName!]
@@ -902,6 +871,11 @@ export class WorkerPool {
         if (poolIndex != -1) {
             instancedPools.slice(poolIndex, 1)
         }
+
+        const proms = this.workers.map(e => e.terminate())
+        await Promise.all(proms)
+        this.workers = []
+        this.workersDic = {}
 
         this.safeEmit('terminate')
         this._emitter.removeAllListeners()

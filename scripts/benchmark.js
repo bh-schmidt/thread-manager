@@ -1,8 +1,18 @@
+import { execa } from "execa";
 import { glob } from "glob";
 import { Bench } from "tinybench";
 import { pathToFileURL } from 'url';
 
 const benchmarkName = process.argv[2]
+
+const result = await execa('npm run build -- --dev', {
+    reject: false,
+    stdio: 'inherit',
+})
+
+if (result.failed) {
+    process.exit(1)
+}
 
 const benchmarks = await glob('**/*.spec.js', {
     cwd: 'benchmarks',

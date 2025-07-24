@@ -6,7 +6,7 @@ import { PromiseHandler } from "./PromiseHandler";
 import { SocketMessageHandler } from "./SocketMessageHandler";
 import { SocketMessageSender } from "./SocketMessageSender";
 import { TaskImp } from "./TaskImp";
-import { WorkerInfo, WorkerData, WorkerEvents, WorkerMessage } from "./Types";
+import { WorkerData, WorkerEvents, WorkerInfo, WorkerMessage } from "./Types";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -19,18 +19,16 @@ export interface WorkerOptions {
 
 export class WorkerImp {
     readonly info: WorkerInfo
-
     instance?: Worker
     sender?: SocketMessageSender
     handler?: SocketMessageHandler;
     channel?: MessageChannel;
     globalPoolChannel?: MessageChannel
     startingPromise?: Promise<void>
-    idleTimeoutId?: any
+    idleTimeoutId?: NodeJS.Timeout
 
+    private _terminated = false
     private _emitter: EventEmitter<WorkerEvents>
-
-    private _idleTimeoutId?: NodeJS.Timeout;
 
     constructor(private options: WorkerOptions) {
         this.validate()
@@ -45,6 +43,8 @@ export class WorkerImp {
     }
 
     async start() {
+        this.validate()
+
         if (this.info.status == 'starting') {
             throw new Error('The worker is already starting')
         }
@@ -59,8 +59,8 @@ export class WorkerImp {
 
         this.info.status = 'starting'
 
-        const ph = new PromiseHandler()
-        this.startingPromise = ph.promise
+        const readyPh = new PromiseHandler()
+        this.startingPromise = readyPh.promise
 
         this.channel = new MessageChannel()
         this.handler = new SocketMessageHandler(this.channel.port1)
@@ -72,10 +72,10 @@ export class WorkerImp {
         }
 
         this.handler.onStatus(() => {
-            if (!ph.completed) {
+            if (!readyPh.completed) {
                 this.info.status = 'ready'
                 this.safeEmit('ready')
-                ph.resolve()
+                readyPh.resolve()
             }
         })
 
@@ -91,52 +91,35 @@ export class WorkerImp {
             env: this.options.env
         })
 
-        this.instance.on('error', (err) => {
-            if (!ph.completed) {
-                this.info.status = 'closed'
-                ph.reject(err)
+        this.instance.on('error', async (err) => {
+            this.info.status = 'closed'
+
+            if (!readyPh.completed) {
+                readyPh.reject(err)
             }
         })
 
-        this.instance.on('exit', (code) => {
-            if (!ph.completed) {
-                this.info.status = 'closed'
-                ph.reject(new Error(`Worker exited with code '${code}'.`))
+        this.instance.on('exit', async (code) => {
+            this.info.status = 'closed'
+
+            if (!readyPh.completed) {
+                readyPh.reject(new Error(`Worker exited with code '${code}'.`))
             }
+
+            await this.terminate()
+                .catch((err) => {
+                    console.error(err)
+                })
         })
 
         this.sender = new SocketMessageSender(this.channel.port1)
 
-        await ph.promise
-    }
-
-    toggleStatus() {
-        if (this.info.status == 'closed')
-            return
-
-        if (this.info.runningTasks > 0)
-            return
-
-        this.info.status = 'ready'
-        this.safeEmit('ready')
-
-        let timeout = this.options.idleTimeout ?? 0
-        timeout = Math.max(timeout, 0)
-
-        clearTimeout(this._idleTimeoutId)
-
-        this._idleTimeoutId = setTimeout(() => {
-            if (this.info.status != 'ready') {
-                return
-            }
-
-            this.info.status = 'idle'
-            this.safeEmit
-                ('idle')
-        }, timeout);
+        await readyPh.promise
     }
 
     async run(task: TaskImp) {
+        this.validate()
+
         try {
             if (this.info.status == 'starting') {
                 await this.startingPromise
@@ -173,11 +156,85 @@ export class WorkerImp {
             return res
         } finally {
             this.info.runningTasks--
-            this.safeEmit
-                ('finish-run')
-            this.toggleStatus()
+            this.safeEmit('finish-run')
+            // this.toggleStatus()
         }
     }
+
+    lock() {
+        this.validate()
+
+        this.info.isLocked = true
+        this.safeEmit('lock')
+    }
+
+    unlock() {
+        this.info.isLocked = false
+        this.safeEmit('unlock')
+    }
+
+    on(type: 'ready', callback: () => void): WorkerImp
+    on(type: 'idle', callback: () => void): WorkerImp
+    on(type: 'lock', callback: () => void): WorkerImp
+    on(type: 'unlock', callback: () => void): WorkerImp
+    on(type: 'finish-run', callback: () => void): WorkerImp
+    on(type: 'terminate', callback: () => void): WorkerImp
+    on(type: any, callback: (...args: any[]) => void) {
+        this.validate()
+
+        this._emitter.on(type, callback)
+        return this
+    }
+
+    once(type: 'ready', callback: () => void): WorkerImp
+    once(type: 'idle', callback: () => void): WorkerImp
+    once(type: 'lock', callback: () => void): WorkerImp
+    once(type: 'unlock', callback: () => void): WorkerImp
+    once(type: 'finish-run', callback: () => void): WorkerImp
+    once(type: 'terminate', callback: () => void): WorkerImp
+    once(type: any, callback: (...args: any[]) => void) {
+        this.validate()
+
+        this._emitter.once(type, callback)
+        return this
+    }
+
+    off(type: 'ready', callback: () => void): WorkerImp
+    off(type: 'idle', callback: () => void): WorkerImp
+    off(type: 'lock', callback: () => void): WorkerImp
+    off(type: 'unlock', callback: () => void): WorkerImp
+    off(type: 'finish-run', callback: () => void): WorkerImp
+    off(type: 'terminate', callback: () => void): WorkerImp
+    off(type: any, callback: (...args: any[]) => void) {
+        this._emitter.off(type, callback)
+        return this
+    }
+
+    // private toggleStatus() {
+    //     if (this.info.status == 'closed')
+    //         return
+
+    //     if (this.info.runningTasks > 0)
+    //         return
+
+    //     this.info.status = 'ready'
+    //     this.safeEmit('ready')
+
+    //     let timeout = this.options.idleTimeout ?? 0
+    //     timeout = Math.max(timeout, 0)
+
+    //     clearTimeout(this._idleTimeoutId)
+
+    //     this._idleTimeoutId = setTimeout(() => {
+    //         if (this.info.status != 'ready') {
+    //             return
+    //         }
+
+    //         this.info.status = 'idle'
+    //         this.safeEmit
+    //             ('idle')
+    //     }, timeout);
+    // }
 
     private getFileUrl(fileName: string | URL | undefined, moduleUrl: string | undefined): string {
         if (!fileName) {
@@ -195,50 +252,14 @@ export class WorkerImp {
         return pathToFileURL(fileName).href
     }
 
-    on(type: 'ready', callback: (worker: WorkerImp) => void): WorkerImp
-    on(type: 'idle', callback: (worker: WorkerImp) => void): WorkerImp
-    on(type: 'lock', callback: (worker: WorkerImp) => void): WorkerImp
-    on(type: 'unlock', callback: (worker: WorkerImp) => void): WorkerImp
-    on(type: 'finish-run', callback: (worker: WorkerImp) => void): WorkerImp
-    on(type: 'terminate', callback: (worker: WorkerImp) => void): WorkerImp
-    on(type: any, callback: (worker: WorkerImp, param?: any) => void) {
-        this._emitter.on(type, callback)
-        return this
-    }
-
-    once(type: 'ready', callback: (worker: WorkerImp) => void): WorkerImp
-    once(type: 'idle', callback: (worker: WorkerImp) => void): WorkerImp
-    once(type: 'lock', callback: (worker: WorkerImp) => void): WorkerImp
-    once(type: 'unlock', callback: (worker: WorkerImp) => void): WorkerImp
-    once(type: 'finish-run', callback: (worker: WorkerImp) => void): WorkerImp
-    once(type: 'terminate', callback: (worker: WorkerImp) => void): WorkerImp
-    once(type: any, callback: (worker: WorkerImp, param?: any) => void) {
-        this._emitter.once(type, callback)
-        return this
-    }
-
-    off(type: 'ready', callback: (worker: WorkerImp) => void): WorkerImp
-    off(type: 'idle', callback: (worker: WorkerImp) => void): WorkerImp
-    off(type: 'lock', callback: (worker: WorkerImp) => void): WorkerImp
-    off(type: 'unlock', callback: (worker: WorkerImp) => void): WorkerImp
-    off(type: 'finish-run', callback: (worker: WorkerImp) => void): WorkerImp
-    off(type: 'terminate', callback: (worker: WorkerImp) => void): WorkerImp
-    off(type: any, callback: (worker: WorkerImp, param?: any) => void) {
-        this._emitter.off(type, callback)
-        return this
-    }
-
-    lock() {
-        this.info.isLocked = true
-        this.safeEmit('lock')
-    }
-
-    unlock() {
-        this.info.isLocked = false
-        this.safeEmit('unlock')
-    }
-
     async terminate() {
+        if (this._terminated) {
+            return
+        }
+
+        this._terminated = true
+        this.info.status = 'closed'
+
         if (this.channel) {
             this.channel.port1.close()
             this.channel.port2.close()
@@ -256,8 +277,6 @@ export class WorkerImp {
             this.instance = undefined
         }
 
-        this.info.status = 'closed'
-
         this.safeEmit('terminate')
         this._emitter.removeAllListeners()
     }
@@ -271,6 +290,10 @@ export class WorkerImp {
     }
 
     private validate() {
+        if (this._terminated) {
+            throw new Error('Worker is terminated.')
+        }
+
         if (this.options.globalPool && !isMainThread) {
             throw new Error('You can only instance a new worker using global pool in main thread.')
         }
